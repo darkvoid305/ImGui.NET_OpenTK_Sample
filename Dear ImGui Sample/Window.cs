@@ -20,13 +20,15 @@ namespace Dear_ImGui_Sample
         public Window() : base(GameWindowSettings.Default, new NativeWindowSettings(){ Size = new Vector2i(1600, 900), APIVersion = new Version(3, 3) })
         { }
 
+        public void Load() => OnLoad();
+
         protected override void OnLoad()
         {
             base.OnLoad();
 
             Title += ": OpenGL Version: " + GL.GetString(StringName.Version);
 
-            _controller = new ImGuiController(ClientSize.X, ClientSize.Y);
+            _controller = new ImGuiController(ClientSize.X, ClientSize.Y ,this);
         }
         
         protected override void OnResize(ResizeEventArgs e)
@@ -40,6 +42,8 @@ namespace Dear_ImGui_Sample
             _controller.WindowResized(ClientSize.X, ClientSize.Y);
         }
 
+        public void Update(double elapsed) => OnRenderFrame(new FrameEventArgs(elapsed));
+
         protected override void OnRenderFrame(FrameEventArgs e)
         {
             base.OnRenderFrame(e);
@@ -49,12 +53,18 @@ namespace Dear_ImGui_Sample
             GL.ClearColor(new Color4(0, 32, 48, 255));
             GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
 
-            // Enable Docking
-            ImGui.DockSpaceOverViewport();
-
+            ImGui.DockSpaceOverViewport(IntPtr.Zero, ImGuiDockNodeFlags.PassthruCentralNode);
             ImGui.ShowDemoWindow();
 
+            ImGui.EndFrame();
+
             _controller.Render();
+
+            if (ImGui.GetIO().ConfigFlags.HasFlag(ImGuiConfigFlags.ViewportsEnable))
+            {
+                ImGui.UpdatePlatformWindows();
+                ImGui.RenderPlatformWindowsDefault();
+            }
 
             ImGuiController.CheckGLError("End of frame");
 

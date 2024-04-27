@@ -1,4 +1,4 @@
-﻿using ImGuiNET;
+using ImGuiNET;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;

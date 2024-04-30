@@ -17,10 +17,10 @@ namespace Dear_ImGui_Sample
     {
         ImGuiController _controller;
 
-        public Window() : base(GameWindowSettings.Default, new NativeWindowSettings(){ Size = new Vector2i(1600, 900), APIVersion = new Version(3, 3) })
+        public Window() : base(GameWindowSettings.Default, new NativeWindowSettings(){ ClientSize = new Vector2i(1600, 900), APIVersion = new Version(3, 3) })
         { }
 
-        public void Load() => OnLoad();
+        public new void Load() => OnLoad();
 
         protected override void OnLoad()
         {

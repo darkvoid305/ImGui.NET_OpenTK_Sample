@@ -25,7 +25,8 @@ namespace Dear_ImGui_Sample
             {
                 watch.Restart();
 
-                wnd.ProcessEvents(1);
+                wnd.NewInputFrame();
+                NativeWindow.ProcessWindowEvents(false);
 
                 wnd.MakeCurrent();
                 wnd.Update(watch.ElapsedTicks / (double)Stopwatch.Frequency);

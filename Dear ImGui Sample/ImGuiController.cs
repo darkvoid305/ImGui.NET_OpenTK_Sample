@@ -10,10 +10,7 @@ using OpenTK.Windowing.GraphicsLibraryFramework;
 using System.Diagnostics;
 using ErrorCode = OpenTK.Graphics.OpenGL4.ErrorCode;
 using System.Runtime.InteropServices;
-using OpenTK.Compute.OpenCL;
 using OpenTK.Windowing.Common;
-using OpenglEngine.Engine.Utils;
-using OpenglEngine.Engine.UX.UX_lib;
 
 namespace Dear_ImGui_Sample
 {
@@ -35,9 +32,26 @@ namespace Dear_ImGui_Sample
             private int _shaderProjectionMatrixLocation;
         }*/
 
+        class ViewportData
+        {
+            public NativeWindow Window;
+            public bool Owned;
+
+            public ViewportData(NativeWindow window, bool owned)
+            {
+                Window = window;
+                Owned = owned;
+            }
+        }
+
         private bool _frameBegun;
 
         private int _fontTexture;
+
+        public int _vertexBuffer;
+        public int _vertexBufferSize;
+        public int _indexBuffer;
+        public int _indexBufferSize;
 
         private int _shader;
         private int _shaderFontTextureLocation;
@@ -50,12 +64,12 @@ namespace Dear_ImGui_Sample
 
         private static bool KHRDebugAvailable = false;
 
-        private readonly OpentkWindow _mainWindowHandle;
+        private readonly NativeWindow _mainWindow;
 
         [DllImport("cimgui", CallingConvention = CallingConvention.Cdecl)]
-        public static unsafe extern void ImGuiPlatformIO_Set_Platform_GetWindowPos(ImGuiPlatformIO* platform_io, IntPtr funcPtr);
+        private static unsafe extern void ImGuiPlatformIO_Set_Platform_GetWindowPos(ImGuiPlatformIO* platform_io, IntPtr funcPtr);
         [DllImport("cimgui", CallingConvention = CallingConvention.Cdecl)]
-        public static unsafe extern void ImGuiPlatformIO_Set_Platform_GetWindowSize(ImGuiPlatformIO* platform_io, IntPtr funcPtr);
+        private static unsafe extern void ImGuiPlatformIO_Set_Platform_GetWindowSize(ImGuiPlatformIO* platform_io, IntPtr funcPtr);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private unsafe delegate void Platform_CreateWindow(ImGuiViewportPtr vp);
@@ -92,10 +106,8 @@ namespace Dear_ImGui_Sample
         private Platform_GetWindowMinimized GetWindowMinimizedDelegate;
         private Platform_SetWindowTitle SetWindowTitleDelegate;
 
-        private IGLFWGraphicsContext windowContext;
         private nint _ImGuiContext;
         private readonly GameWindow _window;
-        private OpentkWindow viewport;
 
         /// <summary>
         /// Constructs a new ImGuiController.
@@ -119,15 +131,15 @@ namespace Dear_ImGui_Sample
 
             IntPtr context = ImGui.CreateContext();
             ImGui.SetCurrentContext(context);
-            var io = ImGui.GetIO();
-
-            io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
-            io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;
-
-            var platformIO = ImGui.GetPlatformIO();
-            ImGuiViewportPtr mainViewport = platformIO.Viewports[0];
-            windowContext = window.Context;
-            _mainWindowHandle = new OpentkWindow(mainViewport, window);
+            ImGuiViewportPtr mainViewport = ImGui.GetMainViewport();
+            ViewportData vpd = new ViewportData(window, false);
+            unsafe
+            {
+                mainViewport.PlatformHandle = (IntPtr)window.WindowPtr;
+            }
+            mainViewport.PlatformUserData = (IntPtr)GCHandle.Alloc(vpd, GCHandleType.Normal);
+            // FIXME: Should we retain a copy?
+            _mainWindow = window;
 
             _ImGuiContext = context;
 
@@ -144,6 +156,7 @@ namespace Dear_ImGui_Sample
             GetWindowMinimizedDelegate = GetWindowMinimized;
             SetWindowTitleDelegate = SetWindowTitle;
 
+            var platformIO = ImGui.GetPlatformIO();
             platformIO.Platform_CreateWindow = Marshal.GetFunctionPointerForDelegate(CreateWindowDelegate);
             platformIO.Platform_DestroyWindow = Marshal.GetFunctionPointerForDelegate(DestroyWindowDelegate);
             platformIO.Platform_ShowWindow = Marshal.GetFunctionPointerForDelegate(ShowWindowDelegate);
@@ -157,13 +170,16 @@ namespace Dear_ImGui_Sample
             ImGuiPlatformIO_Set_Platform_GetWindowPos(platformIO, Marshal.GetFunctionPointerForDelegate(GetWindowPosDelegate));
             ImGuiPlatformIO_Set_Platform_GetWindowSize(platformIO, Marshal.GetFunctionPointerForDelegate(GetWindowSizeDelegate));
 
+            var io = ImGui.GetIO();
             unsafe
             {
-                io.NativePtr->BackendPlatformName = (byte*)new FixedAsciiString("OpenTK Backend").DataPtr;
+                io.NativePtr->BackendPlatformName = (byte*)Marshal.StringToCoTaskMemUTF8("OpenTK Imgui Backend");
+                io.NativePtr->BackendRendererName = (byte*)Marshal.StringToCoTaskMemUTF8("OpenTK Imgui OpenGL Renderer");
             }
 
             io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
             io.ConfigFlags |= ImGuiConfigFlags.ViewportsEnable;
+
             io.BackendFlags |= ImGuiBackendFlags.PlatformHasViewports;
             io.BackendFlags |= ImGuiBackendFlags.RendererHasViewports;
 
@@ -176,9 +192,10 @@ namespace Dear_ImGui_Sample
 
             UpdateMonitors();
 
-            ImGui.NewFrame();
-            _frameBegun = true;
+            //ImGui.NewFrame();
+            //_frameBegun = true;
         }
+
         public unsafe void UpdateMonitors()
         {
             ImGuiPlatformIOPtr platformIO = ImGui.GetPlatformIO();
@@ -204,7 +221,40 @@ namespace Dear_ImGui_Sample
         private unsafe void CreateWindow(ImGuiViewportPtr vp)
         {
             Console.WriteLine("Create Window");
-            OpentkWindow window = new OpentkWindow(vp, windowContext, _ImGuiContext);
+
+            int width = (int)vp.Size.X;
+            int height = (int)vp.Size.Y;
+            NativeWindowSettings settings = new NativeWindowSettings()
+            {
+                StartVisible = false,
+                StartFocused = false,
+                // FIXME: FocusOnShow
+                WindowState = WindowState.Normal,
+                WindowBorder = vp.Flags.HasFlag(ImGuiViewportFlags.NoDecoration) ? WindowBorder.Hidden : WindowBorder.Resizable,
+                // FIXME: Topmost
+                Location = new Vector2i((int)vp.Pos.X, (int)vp.Pos.Y),
+                ClientSize = new Vector2i(width, height),
+                SharedContext = _mainWindow.Context,
+            };
+            NativeWindow window = new NativeWindow(settings);
+            // FIXME: Create window specific resources.
+            //CreateDeviceResources();
+
+            ViewportData vpd = new ViewportData(window, true);
+            unsafe
+            {
+                vp.PlatformHandle = (IntPtr)window.WindowPtr;
+            }
+            vp.PlatformUserData = (IntPtr)GCHandle.Alloc(vpd, GCHandleType.Normal);
+
+            // Hook up events...
+            //_window.Resize += (e) => { vp.PlatformRequestResize = true; };
+            //_window.Move += (e) => { vp.PlatformRequestMove = true; };
+            //_window.Closing += (e) => { vp.PlatformRequestClose = true; };
+            //_window.Resize += (e) => { Resize((int)e.Width, (int)e.Height); };
+
+            
+            //OpentkWindow window = new OpentkWindow(vp, windowContext, _ImGuiContext);
         }
 
         private static unsafe void DestroyWindow(ImGuiViewportPtr vp)
@@ -212,71 +262,70 @@ namespace Dear_ImGui_Sample
             Console.WriteLine("DestroyWindow");
             if (vp.PlatformUserData != IntPtr.Zero)
             {
-                OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-                window.Window.MakeCurrent();
-                window.Dispose();
+                ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+                vpd.Window.MakeCurrent();
+                vpd.Window.Dispose();
                 vp.PlatformUserData = IntPtr.Zero;
             }
         }
 
         private static unsafe void ShowWindow(ImGuiViewportPtr vp)
         {
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-            window.Window.IsVisible = true;
+            ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            vpd.Window.IsVisible = true;
         }
+
         private static unsafe void SetWindowPos(ImGuiViewportPtr vp, Vector2 pos)
         {
             Console.WriteLine("SetWindowPos: " + pos);
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            ViewportData window = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
             window.Window.Location = new Vector2i((int)Math.Floor(pos.X), (int)Math.Floor(pos.Y));
         }
+
         public static unsafe void GetWindowPos(ImGuiViewportPtr vp, out Vector2 pos)
         {
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-            Vector2 loc = window.Window.Bounds.Min;
-            pos = new Vector2(loc.X, loc.Y);
+            ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            pos = vpd.Window.ClientLocation;
         }
+
         public static unsafe void SetWindowSize(ImGuiViewportPtr vp, Vector2 size)
         {
             Console.WriteLine("SetWindowSize: " + size);
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-            window.Window.MakeCurrent();
-            window.Window.Size = new Vector2i((int)size.X, (int)size.Y);
+            ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            vpd.Window.MakeCurrent();
+            vpd.Window.Size = new Vector2i((int)size.X, (int)size.Y);
         }
+        
         public static unsafe void GetWindowSize(ImGuiViewportPtr vp, out Vector2 size)
         {
             Console.WriteLine("GetWindowSize");
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-            Vector2 loc = window.Window.Bounds.Min;
-            size = new Vector2(loc.X, loc.Y);
+            ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            size = vpd.Window.ClientSize;
         }
+        
         public static unsafe void SetWindowFocus(ImGuiViewportPtr vp)
         {
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-            window.Window.Focus();
+            ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            vpd.Window.Focus();
         }
+        
         public static unsafe byte GetWindowFocus(ImGuiViewportPtr vp)
         {
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-            return (byte)(window.Window.IsFocused ? 1 : 0);
+            ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            return (byte)(vpd.Window.IsFocused ? 1 : 0);
         }
+        
         public static unsafe byte GetWindowMinimized(ImGuiViewportPtr vp)
         {
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-            WindowState state = window.Window.WindowState;
-            byte minimized = state == WindowState.Minimized ? (byte)1 : (byte)0;
-            return minimized;
+            ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            bool minimized = vpd.Window.WindowState == WindowState.Minimized;
+            return minimized ? (byte)1 : (byte)0;
         }
+        
         public static unsafe void SetWindowTitle(ImGuiViewportPtr vp, IntPtr title)
         {
-            OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-            byte* titlePtr = (byte*)title;
-            int count = 0;
-            while (titlePtr[count] != 0)
-            {
-                count += 1;
-            }
-            window.Window.Title = System.Text.Encoding.ASCII.GetString(titlePtr, count);
+            ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+            vpd.Window.Title = Marshal.PtrToStringUTF8(title);
         }
 
         public void WindowResized(int width, int height)
@@ -292,6 +341,23 @@ namespace Dear_ImGui_Sample
 
         public void CreateDeviceResources()
         {
+            _vertexBufferSize = 10000;
+            _indexBufferSize = 2000;
+
+            int prevArrayBuffer = GL.GetInteger(GetPName.ArrayBufferBinding);
+
+            _vertexBuffer = GL.GenBuffer();
+            GL.BindBuffer(BufferTarget.ArrayBuffer, _vertexBuffer);
+            LabelObject(ObjectLabelIdentifier.Buffer, _vertexBuffer, "VBO: ImGui");
+            GL.BufferData(BufferTarget.ArrayBuffer, _vertexBufferSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+
+            _indexBuffer = GL.GenBuffer();
+            GL.BindBuffer(BufferTarget.ArrayBuffer, _indexBuffer);
+            LabelObject(ObjectLabelIdentifier.Buffer, _indexBuffer, "EBO: ImGui");
+            GL.BufferData(BufferTarget.ArrayBuffer, _indexBufferSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+
+            GL.BindBuffer(BufferTarget.ArrayBuffer, prevArrayBuffer);
+
             RecreateFontDeviceTexture();
 
             string VertexSource = @"#version 330 core
@@ -328,7 +394,18 @@ void main()
             _shader = CreateProgram("ImGui", VertexSource, FragmentSource);
             _shaderProjectionMatrixLocation = GL.GetUniformLocation(_shader, "projection_matrix");
             _shaderFontTextureLocation = GL.GetUniformLocation(_shader, "in_fontTexture");
-           
+
+            _vertexBufferSize = 10000;
+            _indexBufferSize = 2000;
+
+            _vertexBuffer = GL.GenBuffer();
+            GL.BindBuffer(BufferTarget.ArrayBuffer, _vertexBuffer);
+            GL.BufferData(BufferTarget.ArrayBuffer, _vertexBufferSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+
+            _indexBuffer = GL.GenBuffer();
+            GL.BindBuffer(BufferTarget.ElementArrayBuffer, _indexBuffer);
+            GL.BufferData(BufferTarget.ElementArrayBuffer, _indexBufferSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+
             CheckGLError("End of ImGui setup");
         }
 
@@ -374,36 +451,57 @@ void main()
             {
                 _frameBegun = false;
                 ImGui.Render();
-                RenderImDrawData(ImGui.GetDrawData(), _mainWindowHandle);
+                // FIXME: Don't allocate every frame.
+                RenderImDrawData(ImGui.GetDrawData(), new ViewportData(_mainWindow, false));
 
                 //render windows outside of main (this code heavily based of of the Veldrid example implementation)
                 if ((ImGui.GetIO().ConfigFlags & ImGuiConfigFlags.ViewportsEnable) != 0)
                 {
                     ImGui.UpdatePlatformWindows();
                     ImGuiPlatformIOPtr platformIO = ImGui.GetPlatformIO();
-
                     for (int i = 1; i < platformIO.Viewports.Size; i++)
                     {
                         ImGuiViewportPtr vp = platformIO.Viewports[i];
-                        OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-                        window.Window.MakeCurrent();
+                        ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+                        vpd.Window.MakeCurrent();
                         GL.Clear(ClearBufferMask.ColorBufferBit | ClearBufferMask.DepthBufferBit | ClearBufferMask.StencilBufferBit);
-                        RenderImDrawData(vp.DrawData, window);
+                        RenderImDrawData(vp.DrawData, vpd);
                     }
                 }
             }
             SwapExtraWindows();
-            _mainWindowHandle.Window.MakeCurrent();
+            _mainWindow.MakeCurrent();
         }
+        
+        // FIXME: Remove this function.
         public void SwapExtraWindows()
         {
             ImGuiPlatformIOPtr platformIO = ImGui.GetPlatformIO();
             for (int i = 1; i < platformIO.Viewports.Size; i++)
             {
                 ImGuiViewportPtr vp = platformIO.Viewports[i];
-                OpentkWindow window = (OpentkWindow)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
-                window.Window.SwapBuffers();
+                ViewportData vpd = (ViewportData)GCHandle.FromIntPtr(vp.PlatformUserData).Target;
+                vpd.Window.Context.SwapBuffers();
             }
+        }
+
+        public void NewFrame(float deltaTime)
+        {
+            ImGuiIOPtr io = ImGui.GetIO();
+
+            Vector2 size = _mainWindow.ClientSize;
+            Vector2 framebufferSize = _mainWindow.FramebufferSize;
+            io.DisplaySize = new System.Numerics.Vector2(size.X, size.Y);
+            if (size.X > 0 && size.Y > 0)
+            {
+                io.DisplayFramebufferScale = new System.Numerics.Vector2(framebufferSize.X / size.X, framebufferSize.Y / size.Y);
+            }
+
+            io.DeltaTime = deltaTime;
+
+            // Update mouse data
+            // Update mouse cursor
+            // Update gamepads
         }
 
         /// <summary>
@@ -445,10 +543,6 @@ void main()
 
         readonly List<char> PressedChars = new List<char>();
 
-        private const UInt16 VK_LBUTTON = 0x01;//left mouse button
-        private const UInt16 VK_MBUTTON = 0x04;//middle mouse button
-        private const UInt16 VK_RBUTTON = 0x02;//right mouse button
-
         private void UpdateImGuiInput(GameWindow wnd)
         {
             ImGuiIOPtr io = ImGui.GetIO();
@@ -456,30 +550,15 @@ void main()
             MouseState MouseState = wnd.MouseState;
             KeyboardState KeyboardState = wnd.KeyboardState;
 
-            bool leftPressed = MouseState.IsButtonPressed(MouseButton.Left);
-            bool middlePressed = MouseState.IsButtonPressed(MouseButton.Middle);
-            bool rightPressed = MouseState.IsButtonPressed(MouseButton.Right);
+            io.MouseDown[0] = MouseState[MouseButton.Left];
+            io.MouseDown[1] = MouseState[MouseButton.Right];
+            io.MouseDown[2] = MouseState[MouseButton.Middle];
+            io.MouseDown[3] = MouseState[MouseButton.Button4];
+            io.MouseDown[4] = MouseState[MouseButton.Button5];
 
-            io.MouseDown[0] = leftPressed || MouseState[MouseButton.Left];
-            io.MouseDown[1] = middlePressed || MouseState[MouseButton.Right];
-            io.MouseDown[2] = rightPressed || MouseState[MouseButton.Middle];
-
-            Vector2 globalPos;
-
-            unsafe
-            {
-                globalPos = GlobalCursor.getCursorPosition();
-                io.MouseDown[0] = GlobalCursor.getInputState(VK_LBUTTON);
-                io.MouseDown[1] = GlobalCursor.getInputState(VK_RBUTTON);
-                io.MouseDown[2] = GlobalCursor.getInputState(VK_MBUTTON);
-            }
-
-            Vector2 offset = new Vector2(
-              (wnd.Size.X - wnd.ClientSize.X),
-              (wnd.Size.Y - wnd.ClientSize.Y)
-            );
-
-            Vector2 cursorPos = globalPos - offset; ;
+            // FIXME: Get mouse input regardless if it's in a window or not.
+            // Alternatively get mouse input from all windows.
+            Vector2 cursorPos = wnd.MousePosition + wnd.ClientLocation;
             io.MousePos = new System.Numerics.Vector2(cursorPos.X, cursorPos.Y);
 
             foreach (Keys key in Enum.GetValues(typeof(Keys)))
@@ -516,42 +595,21 @@ void main()
             io.MouseWheelH = offset.X;
         }
 
-        private void RenderImDrawData(ImDrawDataPtr draw_data, OpentkWindow win)
+        private void SetupRenderState(ImDrawDataPtr draw_data, int fb_width, int fb_height, int vao)
         {
-            if (draw_data.CmdListsCount == 0)
-            {
-                return;
-            }
+            GL.Enable(EnableCap.Blend);
+            GL.BlendEquation(BlendEquationMode.FuncAdd);
+            GL.BlendFuncSeparate(BlendingFactorSrc.SrcAlpha, BlendingFactorDest.OneMinusSrcAlpha, BlendingFactorSrc.One, BlendingFactorDest.OneMinusSrcAlpha);
+            GL.Disable(EnableCap.CullFace);
+            GL.Disable(EnableCap.DepthTest);
+            GL.Enable(EnableCap.ScissorTest);
+            // FIXME: Check opengl version for these
+            GL.Disable(EnableCap.PrimitiveRestart);
+            GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
 
-            // Bind the element buffer (thru the VAO) so that we can resize it.
-            GL.BindVertexArray(win._vertexArray);
-            // Bind the vertex buffer so that we can resize it.
-            GL.BindBuffer(BufferTarget.ArrayBuffer, win._vertexBuffer);
-            for (int i = 0; i < draw_data.CmdListsCount; i++)
-            {
-                ImDrawListPtr cmd_list = draw_data.CmdLists[i];
+            GL.Viewport(0, 0, fb_width, fb_height);
 
-                int vertexSize = cmd_list.VtxBuffer.Size * Unsafe.SizeOf<ImDrawVert>();
-                if (vertexSize > win._vertexBufferSize)
-                {
-                    int newSize = (int)Math.Max(win._vertexBufferSize * 1.5f, vertexSize);
-                    
-                    GL.BufferData(BufferTarget.ArrayBuffer, newSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
-                    win._vertexBufferSize = newSize;
-
-                    Console.WriteLine($"Resized dear imgui vertex buffer to new size {win._vertexBufferSize}");
-                }
-
-                int indexSize = cmd_list.IdxBuffer.Size * sizeof(ushort);
-                if (indexSize > win._indexBufferSize)
-                {
-                    int newSize = (int)Math.Max(win._indexBufferSize * 1.5f, indexSize);
-                    GL.BufferData(BufferTarget.ElementArrayBuffer, newSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
-                    win._indexBufferSize = newSize;
-
-                    Console.WriteLine($"Resized dear imgui index buffer to new size {win._indexBufferSize}");
-                }
-            }
+            // FIXME: Support glClipControl(GL_UPPER_LEFT)
 
             // Setup orthographic projection matrix into our constant buffer
             ImGuiIOPtr io = ImGui.GetIO();
@@ -570,17 +628,69 @@ void main()
             GL.Uniform1(_shaderFontTextureLocation, 0);
             CheckGLError("Projection");
 
-            GL.BindVertexArray(win._vertexArray);
+            GL.BindVertexArray(vao);
+
+            // Bind the vertex buffer so that we can resize it.
+            GL.BindBuffer(BufferTarget.ArrayBuffer, _vertexBuffer);
+            // Bind the element buffer so that we can resize it.
+            GL.BindBuffer(BufferTarget.ElementArrayBuffer, _indexBuffer);
+
+            int stride = Unsafe.SizeOf<ImDrawVert>();
+            GL.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, stride, 0);
+            GL.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, stride, 8);
+            GL.VertexAttribPointer(2, 4, VertexAttribPointerType.UnsignedByte, true, stride, 16);
+
+            GL.EnableVertexAttribArray(0);
+            GL.EnableVertexAttribArray(1);
+            GL.EnableVertexAttribArray(2);
+        }
+
+        private void RenderImDrawData(ImDrawDataPtr draw_data, ViewportData vpd)
+        {
+            if (draw_data.CmdListsCount == 0)
+            {
+                return;
+            }
+
+            int prevVAO = GL.GetInteger(GetPName.VertexArrayBinding);
+            
+            int vertexArray = GL.GenVertexArray();
+            
+            for (int i = 0; i < draw_data.CmdListsCount; i++)
+            {
+                ImDrawListPtr cmd_list = draw_data.CmdLists[i];
+
+                int vertexSize = cmd_list.VtxBuffer.Size * Unsafe.SizeOf<ImDrawVert>();
+                if (vertexSize > _vertexBufferSize)
+                {
+                    int newSize = (int)Math.Max(_vertexBufferSize * 1.5f, vertexSize);
+                    
+                    GL.BufferData(BufferTarget.ArrayBuffer, newSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+                    _vertexBufferSize = newSize;
+
+                    Console.WriteLine($"Resized dear imgui vertex buffer to new size {_vertexBufferSize}");
+                }
+
+                int indexSize = cmd_list.IdxBuffer.Size * sizeof(ushort);
+                if (indexSize > _indexBufferSize)
+                {
+                    int newSize = (int)Math.Max(_indexBufferSize * 1.5f, indexSize);
+                    GL.BufferData(BufferTarget.ElementArrayBuffer, newSize, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+                    _indexBufferSize = newSize;
+
+                    Console.WriteLine($"Resized dear imgui index buffer to new size {_indexBufferSize}");
+                }
+            }
+
+            GL.BindVertexArray(vertexArray);
             CheckGLError("VAO");
 
-            draw_data.ScaleClipRects(io.DisplayFramebufferScale);
+            Vector2i fb_size = vpd.Window.FramebufferSize;
+            SetupRenderState(draw_data, fb_size.X, fb_size.Y, vertexArray);
 
-            GL.Enable(EnableCap.Blend);
-            GL.Enable(EnableCap.ScissorTest);
-            GL.BlendEquation(BlendEquationMode.FuncAdd);
-            GL.BlendFunc(BlendingFactor.SrcAlpha, BlendingFactor.OneMinusSrcAlpha);
-            GL.Disable(EnableCap.CullFace);
-            GL.Disable(EnableCap.DepthTest);
+            // FIXME: What is this for?
+            ImGuiIOPtr io = ImGui.GetIO();
+            draw_data.ScaleClipRects(io.DisplayFramebufferScale);
 
             // Render command lists
             for (int n = 0; n < draw_data.CmdListsCount; n++)
@@ -636,6 +746,9 @@ void main()
 
             GL.Disable(EnableCap.Blend);
             GL.Disable(EnableCap.ScissorTest);
+
+            GL.BindVertexArray(prevVAO);
+            GL.DeleteVertexArray(vertexArray);
         }
 
         /// <summary>
@@ -645,6 +758,10 @@ void main()
         {
             GL.DeleteTexture(_fontTexture);
             GL.DeleteProgram(_shader);
+            GL.DeleteBuffer(_vertexBuffer);
+            GL.DeleteBuffer(_indexBuffer);
+
+            GC.SuppressFinalize(this);
         }
 
         public static void LabelObject(ObjectLabelIdentifier objLabelIdent, int glObject, string name)
